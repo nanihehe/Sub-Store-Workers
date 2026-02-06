@@ -191,10 +191,13 @@ jobs:
       - name: Deploy to Cloudflare Workers
         working-directory: build
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          # 注意：这里修正了密钥变量名，匹配你在 GitHub Secrets 设置的真实名称
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          bun run deploy:action
+          # 修正：直接使用 wrangler deploy，不再经过 package.json 的过滤脚本
+          # 这样可以完整显示所有报错信息
+          bun x wrangler deploy
           echo "Deploy completed"
 
   deploy-frontend:
@@ -215,8 +218,9 @@ jobs:
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          # 修正：这里也需要同步使用正确的密钥变量名
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy frontend-dist/dist --project-name=sub-store-frontend
 
   update-version-cache:
