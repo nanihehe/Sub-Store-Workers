@@ -13,8 +13,10 @@ on:
       - multi-tenant
 
 env:
-  FIXED_BACKEND_VERSION: "2.14.33"
-  FIXED_FRONTEND_VERSION: "2.14.33"
+  # === 核心修复：回退到最稳定的 2.13.56 版本 ===
+  FIXED_BACKEND_VERSION: "2.13.56"
+  FIXED_FRONTEND_VERSION: "2.13.56"
+  # ==========================================
   SUBSTORE_REPO: sub-store-org/Sub-Store
   FRONTEND_REPO: sub-store-org/Sub-Store-Front-End
 
