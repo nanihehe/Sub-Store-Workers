@@ -1,9 +1,6 @@
 name: Deploy to Cloudflare
 
 on:
-  push:
-    branches:
-      - multi-tenant
   workflow_dispatch:
     inputs:
       force_deploy:
@@ -11,20 +8,14 @@ on:
         required: false
         type: boolean
         default: true
-      deploy_frontend:
-        description: '部署前端'
-        required: false
-        type: choice
-        default: deploy
-        options:
-          - deploy
-          - skip
+  push:
+    branches:
+      - multi-tenant
 
 env:
-  # === 在这里强制指定版本，不再自动获取 ===
+  # === 核心配置：锁定版本号，防止下载失败 ===
   FIXED_BACKEND_VERSION: "2.14.33"
   FIXED_FRONTEND_VERSION: "2.14.33"
-  # ====================================
   SUBSTORE_REPO: sub-store-org/Sub-Store
   FRONTEND_REPO: sub-store-org/Sub-Store-Front-End
 
@@ -33,35 +24,25 @@ jobs:
     runs-on: ubuntu-latest
     name: Deploy Backend
     steps:
-      - name: Validate JWT_SECRET
-        run: |
-          if [ -z "${{ secrets.JWT_SECRET }}" ]; then
-            echo "::error::JWT_SECRET 未设置！"
-            exit 1
-          fi
-
-      - name: Checkout Workers Adapter Code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Download Sub-Store Source Code
+      - name: Download Sub-Store Source
         run: |
           VERSION=${{ env.FIXED_BACKEND_VERSION }}
-          echo "Downloading Sub-Store source $VERSION..."
-          
-          # 直接下载指定版本
+          echo "Downloading Backend $VERSION..."
           curl -L "https://github.com/${{ env.SUBSTORE_REPO }}/archive/refs/tags/${VERSION}.tar.gz" -o substore.tar.gz
           
-          # 检查文件大小，确保下载成功
-          FILESIZE=$(stat -c%s "substore.tar.gz")
-          if [ "$FILESIZE" -lt 1000 ]; then
-            echo "::error::下载失败，文件太小，可能是版本号错误或网络问题。"
+          # 验证文件
+          if [ ! -s substore.tar.gz ]; then
+            echo "::error::下载失败，文件为空！"
             exit 1
           fi
 
           mkdir -p temp_backend
           tar -xzf substore.tar.gz -C temp_backend --strip-components=1
           
-          # 构建正确的目录结构
+          # 构建目录
           mkdir -p build/sub-store
           cp -r temp_backend/backend build/sub-store/
           rsync -av --exclude='.git' --exclude='build' --exclude='node_modules' --exclude='temp_backend' --exclude='substore.tar.gz' . build/
@@ -70,67 +51,58 @@ jobs:
         run: |
           cd build
           cp wrangler.toml.example wrangler.toml
+          # 注入密钥
           JWT_SECRET='${{ secrets.JWT_SECRET }}'
           ESCAPED_JWT_SECRET=$(printf '%s' "$JWT_SECRET" | sed -e 's/[\\/&]/\\\\&/g')
           sed -i "s|__JWT_SECRET__|$ESCAPED_JWT_SECRET|g" wrangler.toml
 
-      - name: Setup Bun
+      - name: Setup Environment
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: latest
-
       - name: Install Dependencies
-        working-directory: build/sub-store/backend
-        run: pnpm install
+        run: |
+          cd build/sub-store/backend && npm install
+          cd ../.. && bun install
 
-      - name: Install Build Dependencies
-        working-directory: build
-        run: bun install
-
-      - name: Build with Vite
+      - name: Build Backend
         working-directory: build
         run: bun run build
 
-      - name: Deploy to Cloudflare Workers
+      - name: Deploy Backend to Workers
         working-directory: build
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          bun x wrangler deploy
-          echo "Backend Deployment Completed!"
+        run: bun x wrangler deploy
 
   deploy-frontend:
     runs-on: ubuntu-latest
     name: Deploy Frontend
     steps:
-      - name: Download Sub-Store Frontend dist  
-- 名称 ： 下载子商店前端分发
+      - name: Download Frontend Dist
         run: |
           VERSION=${{ env.FIXED_FRONTEND_VERSION }}
-          echo "Downloading Sub-Store Frontend $VERSION..."
-          
+          echo "Downloading Frontend $VERSION..."
           curl -L "https://github.com/${{ env.FRONTEND_REPO }}/releases/download/${VERSION}/dist.zip" -o dist.zip
           
           mkdir -p frontend-temp
           unzip -o dist.zip -d frontend-temp
           
+          # 自动寻找 index.html 路径
           REAL_PATH=$(find frontend-temp -name "index.html" -exec dirname {} + | head -n 1)
           echo "REAL_PATH=$REAL_PATH" >> $GITHUB_ENV
 
-      - name: Setup Bun
+      - name: Setup Environment
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Deploy to Cloudflare Pages
+      - name: Deploy Frontend to Pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
+          echo "Deploying from: ${{ env.REAL_PATH }}"
           bun x wrangler pages deploy "${{ env.REAL_PATH }}" --project-name=sub-store-frontend --branch=main --commit-dirty=true
