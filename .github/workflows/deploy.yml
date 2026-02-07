@@ -63,14 +63,27 @@ jobs:
 
       - name: Check for New Releases
         id: check
+        env:
+          # 【关键修复】使用 Token 避免 API 速率限制
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取最新版本
-          BACKEND_VERSION=$(curl -m 10 -s https://api.github.com/repos/${{ env.SUBSTORE_REPO }}/releases/latest | jq -r '.tag_name' || echo "fetch-failed")
-          FRONTEND_VERSION=$(curl -m 10 -s https://api.github.com/repos/${{ env.FRONTEND_REPO }}/releases/latest | jq -r '.tag_name' || echo "fetch-failed")
+          # 定义一个带身份验证的获取函数
+          get_latest_tag() {
+            curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$1/releases/latest" | jq -r '.tag_name'
+          }
 
-          if [[ "$BACKEND_VERSION" == "fetch-failed" || "$FRONTEND_VERSION" == "fetch-failed" ]]; then
-            echo "::error::获取上游 releases 版本失败（可能是网络/限流），停止部署"
+          echo "Fetching latest versions..."
+          BACKEND_VERSION=$(get_latest_tag ${{ env.SUBSTORE_REPO }})
+          FRONTEND_VERSION=$(get_latest_tag ${{ env.FRONTEND_REPO }})
+
+          # 检查是否获取失败 (null 或 空)
+          if [[ "$BACKEND_VERSION" == "null" || -z "$BACKEND_VERSION" ]]; then
+            echo "::error::无法获取后端版本 (可能是 API 限流)，请稍后再试。"
             exit 1
+          fi
+          if [[ "$FRONTEND_VERSION" == "null" || -z "$FRONTEND_VERSION" ]]; then
+             echo "::error::无法获取前端版本 (可能是 API 限流)。"
+             exit 1
           fi
 
           echo "backend_version=$BACKEND_VERSION" >> $GITHUB_OUTPUT
@@ -79,8 +92,8 @@ jobs:
           LAST_BACKEND=$(cat .last-backend-version 2>/dev/null || echo "none")
           LAST_FRONTEND=$(cat .last-frontend-version 2>/dev/null || echo "none")
 
-          echo "Current backend: $BACKEND_VERSION (last: $LAST_BACKEND)"
-          echo "Current frontend: $FRONTEND_VERSION (last: $LAST_FRONTEND)"
+          echo "Backend: Current=$BACKEND_VERSION (Last=$LAST_BACKEND)"
+          echo "Frontend: Current=$FRONTEND_VERSION (Last=$LAST_FRONTEND)"
 
           DEPLOY_TOKEN="ACTION_START_${{ github.run_id }}"
 
@@ -95,7 +108,7 @@ jobs:
             echo "Backend deploy: NO"
           fi
 
-          # 前端判断：默认强制部署
+          # 前端判断
           MODE="${{ github.event.inputs.deploy_frontend }}"
           if [[ -z "$MODE" ]]; then MODE="deploy"; fi
           
@@ -132,16 +145,30 @@ jobs:
 
       - name: Download Sub-Store Source Code
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=${{ needs.check-updates.outputs.backend_version }}
           echo "Downloading Sub-Store source $VERSION..."
-          SUBSTORE_REPO='${{ env.SUBSTORE_REPO }}' \
-          SUBSTORE_VERSION="$VERSION" \
-          bash scripts/fetch-substore.sh
+          
+          # 【修复】增加 Token 头以防止下载时 403/404
+          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://github.com/${{ env.SUBSTORE_REPO }}/archive/refs/tags/${VERSION}.tar.gz" -o substore.tar.gz
+            
+          # 检查文件是否下载成功
+          if [ ! -s substore.tar.gz ]; then
+            echo "::error::下载失败，文件为空！"
+            exit 1
+          fi
+
+          # 解压并移动
+          mkdir -p temp_backend
+          tar -xzf substore.tar.gz -C temp_backend --strip-components=1
           
           mkdir -p build
-          rsync -av --exclude='.git' --exclude='build' --exclude='node_modules' . build/
+          # 只要 backend 目录和必要文件
+          cp -r temp_backend/backend build/
+          # 复制适配器代码
+          rsync -av --exclude='.git' --exclude='build' --exclude='node_modules' --exclude='temp_backend' --exclude='substore.tar.gz' . build/
 
       - name: Configure wrangler.toml
         run: |
@@ -162,7 +189,7 @@ jobs:
           version: latest
 
       - name: Install backend dependencies
-        working-directory: build/sub-store/backend
+        working-directory: build/backend
         run: pnpm install
 
       - name: Install dependencies
@@ -190,15 +217,25 @@ jobs:
 
     steps:
       - name: Download Sub-Store Frontend dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=${{ needs.check-updates.outputs.frontend_version }}
           echo "Downloading Sub-Store Frontend $VERSION..."
-          # 下载 release
-          curl -L "https://github.com/${{ env.FRONTEND_REPO }}/releases/download/${VERSION}/dist.zip" -o dist.zip
-          mkdir -p frontend-temp
-          unzip dist.zip -d frontend-temp
           
-          # 【自动修正路径】找到 index.html 所在的真正目录
+          # 【修复】增加 Token 头
+          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://github.com/${{ env.FRONTEND_REPO }}/releases/download/${VERSION}/dist.zip" -o dist.zip
+          
+          mkdir -p frontend-temp
+          # 检查是否下载到了 HTML 错误页面（如果是404）
+          if file dist.zip | grep -q "HTML"; then
+             echo "::error::下载错误：下载到的是 HTML 页面而不是 ZIP，可能是版本号错或 Token 权限不足。"
+             exit 1
+          fi
+          
+          unzip -o dist.zip -d frontend-temp
+          
           REAL_PATH=$(find frontend-temp -name "index.html" -exec dirname {} + | head -n 1)
           
           if [ -z "$REAL_PATH" ]; then
@@ -219,9 +256,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          # 直接使用 bun 运行 wrangler，避免 npx 路径问题
           echo "Deploying from ${{ env.REAL_PATH }}..."
-          bun x wrangler pages deploy "${{ env.REAL_PATH }}" --project-name=sub-store-frontend --branch=main
+          bun x wrangler pages deploy "${{ env.REAL_PATH }}" --project-name=sub-store-frontend --branch=main --commit-dirty=true
 
   update-version-cache:
     needs: [check-updates, deploy-backend, deploy-frontend]
