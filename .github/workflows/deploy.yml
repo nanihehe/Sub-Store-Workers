@@ -202,7 +202,7 @@ jobs:
 
   deploy-frontend:
     needs: check-updates
-    if: contains(needs.check-updates.outputs.deploy_frontend_needed, 'ACTION_START') && needs.check-updates.outputs.deploy_frontend == 'true'
+    if: contains(needs.check-updates.outputs.deploy_frontend_needed, 'ACTION_START')
     runs-on: ubuntu-latest
     name: Deploy Frontend
 
