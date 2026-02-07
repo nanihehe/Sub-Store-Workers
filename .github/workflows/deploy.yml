@@ -13,10 +13,9 @@ on:
       - multi-tenant
 
 env:
-  # === 核心修复：回退到最稳定的 2.13.56 版本 ===
+  # === 核心配置：锁定稳定版 2.13.56 ===
   FIXED_BACKEND_VERSION: "2.13.56"
   FIXED_FRONTEND_VERSION: "2.13.56"
-  # ==========================================
   SUBSTORE_REPO: sub-store-org/Sub-Store
   FRONTEND_REPO: sub-store-org/Sub-Store-Front-End
 
@@ -29,13 +28,24 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download Sub-Store Source
+        env:
+          # 【关键修复】必须带上 Token，否则会被 GitHub 404 拦截
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=${{ env.FIXED_BACKEND_VERSION }}
           echo "Downloading Backend $VERSION..."
-          curl -L "https://github.com/${{ env.SUBSTORE_REPO }}/archive/refs/tags/${VERSION}.tar.gz" -o substore.tar.gz
           
-          if [ ! -s substore.tar.gz ]; then
-            echo "::error::Download failed!"
+          # 使用 Token 下载，解决 404 问题
+          curl -L -H "Authorization: token $GITHUB_TOKEN" \
+            "https://github.com/${{ env.SUBSTORE_REPO }}/archive/refs/tags/${VERSION}.tar.gz" -o substore.tar.gz
+          
+          # 检查文件是否真的是压缩包
+          FILESIZE=$(stat -c%s "substore.tar.gz")
+          echo "文件大小: $FILESIZE 字节"
+          
+          if [ "$FILESIZE" -lt 1000 ]; then
+            echo "::error::下载失败！内容如下："
+            cat substore.tar.gz
             exit 1
           fi
 
@@ -54,6 +64,7 @@ jobs:
           ESCAPED_JWT_SECRET=$(printf '%s' "$JWT_SECRET" | sed -e 's/[\\/&]/\\\\&/g')
           sed -i "s|__JWT_SECRET__|$ESCAPED_JWT_SECRET|g" wrangler.toml
 
+      # 安装 pnpm (解决依赖安装报错)
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -67,6 +78,7 @@ jobs:
       - name: Install Dependencies
         run: |
           echo "Installing Backend with pnpm..."
+          # 使用 pnpm 安装后端依赖
           cd build/sub-store/backend && pnpm install
           
           echo "Installing Adapter with Bun..."
@@ -88,10 +100,22 @@ jobs:
     name: Deploy Frontend
     steps:
       - name: Download Frontend Dist
+        env:
+          # 【关键修复】前端下载也加上 Token
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=${{ env.FIXED_FRONTEND_VERSION }}
           echo "Downloading Frontend $VERSION..."
-          curl -L "https://github.com/${{ env.FRONTEND_REPO }}/releases/download/${VERSION}/dist.zip" -o dist.zip
+          
+          curl -L -H "Authorization: token $GITHUB_TOKEN" \
+            "https://github.com/${{ env.FRONTEND_REPO }}/releases/download/${VERSION}/dist.zip" -o dist.zip
+          
+          # 检查下载结果
+          if [ $(stat -c%s dist.zip) -lt 1000 ]; then
+             echo "::error::前端下载失败，内容："
+             cat dist.zip
+             exit 1
+          fi
           
           mkdir -p frontend-temp
           unzip -o dist.zip -d frontend-temp
